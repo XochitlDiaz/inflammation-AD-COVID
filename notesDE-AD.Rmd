@@ -1,0 +1,264 @@
+---
+title: "DE AD"
+author: "Xochitl Diaz"
+date: "September 11, 2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = F)
+```
+
+## Data Source
+
+Data was avilibe through Gene Expression Omnibus(GEO) through the following assecion: GSE214979
+
+The purose of the experiments performed to generate the data set, was to caracterize cell-type 
+specific trnscriptional differences between postmortem Dorso Lateral Prefrontal Cortex tissue
+of 7 AD donors and 8 controls.  
+
+The performed snRNAseq and snATACseq with 10xgenomics to identify candidate cis-regulatory elements
+involved in AD transcriptional changes in different cell types.
+
+*scRNAseq Files Available*
+- meta data file with identified cell types, experimental batches, genomic type percent etc.
+- fitered features matrix (used this one)
+- unfiltered features matrix
+
+
+## Libraries used
+
+```{r}
+library(Seurat)
+#library(hdf5)
+library(ggplot2)
+#library(SeuratDisk)
+```
+ 
+## Load data
+
+```{r}
+
+metadata="GSE214979_cell_metadata.csv"
+matfile="GSE214979_filtered_feturemat.h5"
+
+
+metadata=read.csv(metadata)
+
+#Using rhdf5 library
+#mat=H5Fopen(matfile)
+#matrix contents
+#h5ls(mat)
+
+#Using Seurat library | worked with cluster's R 4.2.0
+mat= Read10X_h5(matfile)
+head(mat,10)
+```
+
+
+File has 
+-`Gene Expression` -> scRNAseq
+-`Peaks`-> ATACseq
+
+
+Add Meta data to seurat Object
+```{r}
+expmat= CreateSeuratObject(counts = mat$`Gene Expression`, meta.data=metadata)
+#peakmat= CreateSeuratObject(counts = mat$`Peaks`) #not using this
+
+#Add Status as metadata 
+expmat=AddMetaData(expmat, metadata$Status, col.name="Status")
+str(expmat)
+
+metadatanames=colnames(metadata)
+metadatanames
+
+expmat=AddMetaData(expmat, metadata$nCount_RNA, col.name="nCount_RNA")
+expmat=AddMetaData(expmat, metadata$nFeature_RNA, col.name="nFeature_RNA")
+expmat=AddMetaData(expmat, metadata$percent.mt, col.name="percent.mt")
+expmat=AddMetaData(expmat, metadata$Age, col.name="Age")
+expmat=AddMetaData(expmat, metadata$Sub.batch, col.name="Sub.batch")
+expmat=AddMetaData(expmat, metadata$predicted.id, col.name="predicted.id")
+expmat=AddMetaData(expmat, metadata$APOE_Status, col.name="APOE_Status")
+expmat=AddMetaData(expmat, metadata$structure, col.name="structure")
+expmat=AddMetaData(expmat, metadata$subs, col.name="subs")
+#expmat
+#An object of class Seurat
+#36601 features across 105332 samples within 1 assay
+#Active assay: RNA (36601 features, 0 variable features)
+
+#Working with the filtered data
+range(expmat@meta.data$percent.mt)
+#[1] 0.000000 4.998738
+range(expmat@meta.data$nCount_RNA) #how much is too much RNA for a single cell?
+#[1]    217 276896
+range(expmat@meta.data$nFeature_RNA)
+#[1]   202 10067
+
+
+```
+
+
+Removing Cells with low expression on to much expression
+```{r}
+
+#A good quality dataset should follow a straight line
+FeatureScatter(expmat, feature1= "nCount_RNA", feature2= "nFeature_RNA") +
+  geom_smooth(method = "lm")
+
+expmat=subset(expmat,subset=nCount_RNA>1000 & nCount_RNA<35000)
+
+```
+
+![Counts before filtering](Feature-CountQC1.png)
+
+
+![Counts after filtering](Feature-CountQC2.png)
+
+
+Normalization and biologicaly relvant features
+```{r}
+expmat =NormalizeData(expmat)
+#Most explanatory relevant variables
+expmat = FindVariableFeatures(expmat, selection.method= "vst", nfeatures = 2000)
+top25= head(VariableFeatures(expmat),25)
+#Batch effect correction
+expmat = ScaleData(expmat)
+```
+
+
+Dimentionality Reduction
+```{r}
+expmat = RunPCA(expmat, features = VariableFeatures(object = expmat))
+ElbowPlot(expmat)
+#10 PC
+
+#Clustering celltypes
+expmat = FindNeighbors(expmat, dims=1:15)
+expmat = FindClusters(expmat, resolution= c(0.1,0.3,0.5,0.7,1))
+#The resolution they used for predicted.id
+expmat = FindClusters(expmat, resolution=0.01)
+DimPlot(expmat, group.by= "RNA_snn_res.0.01", label=T)
+
+Idents(expmat)="predicted.id"
+DimPlot(expmat)
+
+
+#UMAP
+expmat=RunUMAP(expmat, dims=1:15)
+DimPlot(expmat,reduction="umap", split.by = "Status")
+
+```
+![Principal Componets](elbowplot.png)
+
+
+
+![PC colored by provided cell type](CellTypePC1&2.png)
+
+![PC colored by resolution 0.01](RNA_snn_res.0.01PC1&2.png)
+
+![UMAP clustering Ad vs Controls](UMAP.png)
+
+
+Finding Cell Type specific markers
+```{r}
+celltype= c("Excitatory", "Oligodendrocytes", "Microglia","Astrocytes",     
+            "Inhibitory", "OPCs", "Pericytes", "Endothelial")
+
+
+cell_markers= data.frame(matrix(nrow=0,ncol = length(cols)))
+colnames(cell_markers)=cols
+write.table(cell_markers, file = "cell_markers.csv")
+
+#Read Seurat object
+#expmat= LoadH5Seurat(matfile)
+#explore the file without loading
+#expmat=Connect(matfile)
+
+i=0
+for (cell in celltype) {
+  i = i+1
+  ThisCell_markers = FindMarkers(expmat, ident.1=cell, ident.2=NULL)
+  ThisCell_markers$marker=row.names(ThisCell_markers)
+  ThisCell_markers$cell_type= rep(i,nrow(ThisCell_markers))
+
+  #append markers to existing table
+  write.table(ThisCell_markers, file = 'cell_markers.csv', append = T, row.names = F,col.names = F)
+}
+```
+
+
+Finding Cell Type specific markers across Status (AD vs control for each cell type)
+```{r}
+cell_markers= data.frame(matrix(nrow=0,ncol = length(cols)))
+colnames(cell_markers)=cols
+write.table(cell_markers, file = "ADctrl_cell_markers.csv")
+
+i=0
+for (cell in celltype) {
+i = i+1
+ThisCell_markers = FindMarkers(expmat, ident.1=cell, ident.2=NULL)
+ThisCell_markers$marker=row.names(ThisCell_markers)
+ThisCell_markers$cell_type= rep(i,nrow(ThisCell_markers))
+
+
+#append markers to existing table
+write.table(ThisCell_markers, file = 'ADctrl_cell_markers.csv', append = T, row.names = F,col.names = F)
+}
+```
+
+
+Finding Bulk markers across Status
+```{r}
+cell_markers= data.frame(matrix(nrow=0,ncol = length(cols)))
+colnames(cell_markers)=cols
+write.table(cell_markers, file = "bulkctrlAD_markers.csv")
+
+Idents(expmat)="Status"
+ThisCell_markers = FindMarkers(expmat, ident.1="AD", ident.2="Ctrl")
+ThisCell_markers$marker=row.names(ThisCell_markers)
+  
+  
+#append markers to existing table
+write.table(ThisCell_markers, file = "bulkctrlAD_markers.csv", append = T, row.names = F,col.names = F)
+
+```
+
+
+
+#AD candidate/confirmed causal genes -> doi: https://doi.org/10.1038/s41588-020-00776-w
+dat1=c("ADAMTS4","CR1","BIN1","INPP5D","NCK2",
+      "SPRED2","TMEM163","CLNK","CD2AP","HLA",  
+      "TREM2","EPHA1","IKZF1","PILRA","PTK2B-CLU",
+      "CCDC6","ECHDC3","TSPAN14","MS4A4A","PICALM",
+      "SORL1","SPI1","FERMT2","SLC24A4","ADAM10",
+      "APH1B","SPPL2A","PLCG2","VKORC1","ACE",   
+      "SCIMP","TSPOAP1","ABCA7","APOE","CD33",
+      "CASS4","APP-ADAMTS1")
+
+#ASRD -> doi: 10.1016/j.omtm.2022.09.007
+dat2=c("CTCFL", "CXCL8", "IFI16", "C4A/C4B", "FKBP5", "C5AR1", "IL18",
+       "GFAP","PLAT","C4B_2","IL6R","CAV1","KLF4","STAT3", "EGFR","HSP90AB1",
+       "HSP90AA1","APP","CALB1","HSPA8","CCKBR","BDNF","CAMKK2", "TAC1")
+
+#Lateste AD and Dementia sumstats
+dat3=c(unique(ADandDM_gwas_association2022_GCST90027158$MAPPED_GENE))
+
+#Migraine with MCI
+dat4=c("TGFBR3", "TGFBR3", "PSMA2P1 - RNU6-1135P", "ARHGAP29",
+       "ST18", "TGFBR3", "Y_RNA - PTMAP10", "CDH4" )
+
+allGWAS= c(dat1,dat2,dat3,dat4)
+allGWAS = unique(allGWAS)
+
+
+
+
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
